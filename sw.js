@@ -1,4 +1,4 @@
-const CACHE_NAME = 'street-story-v6';
+const CACHE_NAME = 'street-story-v7';
 const APP_SHELL = ['./', './index.html', './styles.css', './app.js', './fixes.js', './manifest.webmanifest'];
 
 self.addEventListener('install', event => {
@@ -15,7 +15,6 @@ self.addEventListener('activate', event => {
 
 self.addEventListener('fetch', event => {
   if (event.request.method !== 'GET') return;
-
   event.respondWith(
     fetch(event.request)
       .then(response => {
