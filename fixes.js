@@ -1,5 +1,5 @@
-// Compatibility and search improvements loaded after app.js.
-// Keeps the working core intact while adding Hebrew street-name variants.
+// Compatibility, source enrichment and conservative historical extraction loaded after app.js.
+// The rule is simple: only display dates/names when the source text states them explicitly.
 
 Object.assign(streetAliases, {
   'דוד בן גוריון': 'שדרות בן גוריון',
@@ -22,8 +22,7 @@ if (pilotData['רוטשילד']) {
   pilotData['רוטשילד'].namedYear = null;
 }
 
-// Verified special case: the boulevard was formerly Keren Kayemet and was renamed
-// shortly after David Ben-Gurion's death. Multiple sources explicitly give 1974.
+// Verified special case retained as a safety net while the generic extractor improves.
 const BEN_GURION_HISTORY = {
   origin: 'השדרות נקראות על שמו של דוד בן־גוריון (1886–1973), ממנהיגי התנועה הציונית, מכריז הקמת מדינת ישראל וראש הממשלה הראשון שלה.',
   foundedYear: null,
@@ -62,24 +61,108 @@ function streetBaseName(street) {
     .trim();
 }
 
+function uniqueSources(items) {
+  const seen = new Set();
+  return (items || []).filter(item => {
+    if (!item) return false;
+    const key = typeof item === 'string' ? item : `${item.url || ''}|${item.label || ''}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function normalizeHistoricalName(value) {
+  return String(value || '')
+    .replace(/^[\s:–—-]+|[\s,;:.–—-]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function plausibleFormerName(value) {
+  const name = normalizeHistoricalName(value);
+  if (!name || name.length < 2 || name.length > 80) return null;
+  if (/^(הרחוב|השדרה|הדרך|שמו|שמה|השם|כיום|היום)$/u.test(name)) return null;
+  return name;
+}
+
+function extractExplicitFoundedYear(text) {
+  const patterns = [
+    /(?:הרחוב|השדרה|הדרך)?\s*(?:נסלל[ה]?|נפתח[ה]?|נוסד[ה]?|הוקם|הוקמה)\s+(?:לראשונה\s+)?(?:בשנת|ב־?|ב-)\s*(18\d{2}|19\d{2}|20\d{2})/u,
+    /(?:בשנת|ב־?|ב-)\s*(18\d{2}|19\d{2}|20\d{2})\s+(?:נסלל[ה]?|נפתח[ה]?|נוסד[ה]?|הוקם|הוקמה)\s+(?:הרחוב|השדרה|הדרך)/u
+  ];
+  for (const pattern of patterns) {
+    const match = String(text || '').match(pattern);
+    if (match?.[1]) return match[1];
+  }
+  return null;
+}
+
+function extractExplicitNamedYear(text) {
+  const source = String(text || '');
+  const patterns = [
+    /(?:בשנת|ב־?|ב-)\s*(18\d{2}|19\d{2}|20\d{2})[^.!?]{0,90}?(?:נקרא|נקראה|נקראו|שונה שמו|שונה שמה|הוסב שמו|הוסב שמה|נקבע שמו|נקבע שמה)/u,
+    /(?:נקרא|נקראה|נקראו|שונה שמו|שונה שמה|הוסב שמו|הוסב שמה|נקבע שמו|נקבע שמה)[^.!?]{0,90}?(?:בשנת|ב־?|ב-)\s*(18\d{2}|19\d{2}|20\d{2})/u,
+    /(?:עד|עד שנת)\s*(18\d{2}|19\d{2}|20\d{2})\s+(?:נקרא|נקראה|נקראו)[^.!?]{1,90}?(?:ומאז|ולאחר מכן|ואחר כך|וכיום|והיום)/u
+  ];
+  for (const pattern of patterns) {
+    const match = source.match(pattern);
+    if (match?.[1]) return match[1];
+  }
+  return null;
+}
+
+function extractExplicitFormerNames(text) {
+  const source = String(text || '');
+  const results = [];
+  const patterns = [
+    /(?:נקרא|נקראה|נקראו)\s+(?:אז|בעבר|תחילה|בראשיתו|בראשיתה|לימים)\s+([^.;]{2,80}?)(?=\s+(?:והיום|וכיום|ולימים|ולאחר|ואחר)|[.;]|$)/gu,
+    /(?:עד|עד שנת)\s*(?:18\d{2}|19\d{2}|20\d{2})?\s*(?:נקרא|נקראה|נקראו)\s+([^.;]{2,80}?)(?=\s+(?:והיום|וכיום|ומאז|ולאחר)|[.;]|$)/gu,
+    /(?:לשעבר|שמו הקודם היה|שמה הקודם היה|השם הקודם היה)\s+([^.;]{2,80}?)(?=[.;]|$)/gu
+  ];
+  for (const pattern of patterns) {
+    for (const match of source.matchAll(pattern)) {
+      const candidate = plausibleFormerName(match[1]);
+      if (candidate && !results.includes(candidate)) results.push(candidate);
+    }
+  }
+  return results.slice(0, 4);
+}
+
+function cleanGuideHeading(heading) {
+  return String(heading || '')
+    .replace(/\s*\([^)]*\)\s*/g, ' ')
+    .replace(/\s+\d{4}\s*[-–]\s*\d{4}\s*/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Search more flexibly for streets whose Wikipedia title uses רחוב/שדרות/דרך.
+buildWikipediaSearchQueries = function(street, city) {
+  const shortCity = city.replace('-יפו', '').trim();
+  const base = streetBaseName(street);
+  return [...new Set([
+    `רחוב ${base} ${shortCity}`,
+    `שדרות ${base} ${shortCity}`,
+    `דרך ${base} ${shortCity}`,
+    `${base} (${shortCity})`,
+    `${base} ${shortCity}`
+  ])];
+};
+
 isLikelyStreetArticle = function(title, street, city) {
   const normalizedTitle = canonicalStreetText(title);
   const normalizedStreet = canonicalStreetText(street);
   const shortCity = city.replace('-יפו', '').trim().toLowerCase();
   return normalizedTitle.includes(normalizedStreet) &&
-    (title.includes('רחוב') || title.includes('שדרות') || title.toLowerCase().includes(shortCity));
+    (title.includes('רחוב') || title.includes('שדרות') || title.includes('דרך') || title.toLowerCase().includes(shortCity));
 };
 
+// Try several common street forms in Nominatim while respecting its public rate limit.
 geocodeStreet = async function(street, city) {
   const base = String(street || '').trim();
   const stripped = base.replace(/^(רחוב|שדרות|שדרה|סמטת|סמטה|דרך)\s+/u, '').trim();
-  const candidates = [...new Set([
-    base,
-    stripped,
-    `רחוב ${stripped}`,
-    `שדרות ${stripped}`,
-    `דרך ${stripped}`
-  ].filter(Boolean))];
+  const candidates = [...new Set([base, stripped, `רחוב ${stripped}`, `שדרות ${stripped}`, `דרך ${stripped}`].filter(Boolean))];
 
   for (const candidate of candidates) {
     const cacheKey = `geo:${city}:${candidate}`;
@@ -134,30 +217,36 @@ async function fetchMunicipalGuideHistory(street, city) {
   const base = streetBaseName(street);
   const letter = firstHebrewLetterForGuide(base);
   if (!letter) return null;
+
   const pageTitle = `${MUNICIPAL_GUIDE_WIKISOURCE}/${letter}`;
   const sectionsParams = new URLSearchParams({ action: 'parse', page: pageTitle, prop: 'sections', format: 'json', origin: '*' });
-  const sectionsData = await fetchJson(`${WIKISOURCE_API}?${sectionsParams}`, `ws-guide-sections-v3:${pageTitle}`);
+  const sectionsData = await fetchJson(`${WIKISOURCE_API}?${sectionsParams}`, `ws-guide-sections-v10:${pageTitle}`);
   const sections = sectionsData?.parse?.sections || [];
+
   let best = null;
   for (const section of sections) {
     const score = guideSectionScore(section.line, base);
     if (score > (best?.score ?? -1)) best = { section, score };
   }
   if (!best || best.score < 50) return null;
+
   const sectionParams = new URLSearchParams({ action: 'parse', page: pageTitle, section: best.section.index, prop: 'text', format: 'json', origin: '*' });
-  const sectionData = await fetchJson(`${WIKISOURCE_API}?${sectionParams}`, `ws-guide-section-v3:${pageTitle}:${best.section.index}`);
+  const sectionData = await fetchJson(`${WIKISOURCE_API}?${sectionParams}`, `ws-guide-section-v10:${pageTitle}:${best.section.index}`);
   let text = htmlToPlainText(sectionData?.parse?.text?.['*'] || '');
   text = text.replace(/\[עריכה\]/g, '').replace(/\s+/g, ' ').trim();
   if (!text) return null;
+
   const heading = String(best.section.line || base).replace(/\s+/g, ' ').trim();
+  const cleanHeading = cleanGuideHeading(heading);
   const guideUrl = `https://he.wikisource.org/wiki/${encodeURIComponent(pageTitle).replace(/%2F/g, '/')}`;
-  const formerNames = [];
-  const formerMatch = text.match(/(?:נקרא|נקראה|נקראו)\s+אז\s+([^.;]{2,70})/u);
-  if (formerMatch?.[1]) formerNames.push(formerMatch[1].trim());
+  const namedYear = extractExplicitNamedYear(text);
+  const foundedYear = extractExplicitFoundedYear(text);
+  const formerNames = extractExplicitFormerNames(text);
+
   return {
-    origin: `הרחוב נקרא על שם ${heading.replace(/\s*\([^)]*\)\s*/g, ' ').replace(/\s+\d{4}[-–]\d{4}\s*/g, ' ').trim()}. לפי מדריך הרחובות של עיריית תל אביב-יפו: ${text.slice(0, 520)}`,
-    foundedYear: null,
-    namedYear: null,
+    origin: `הרחוב נקרא על שם ${cleanHeading}. לפי מדריך הרחובות של עיריית תל אביב-יפו: ${text.slice(0, 520)}`,
+    foundedYear,
+    namedYear,
     formerNames,
     description: text.slice(0, 1100),
     sources: [
@@ -165,28 +254,41 @@ async function fetchMunicipalGuideHistory(street, city) {
       { label: `ויקיטקסט — מדריך הרחובות (${heading})`, url: guideUrl }
     ],
     automatic: true,
-    municipalGuide: true
+    municipalGuide: true,
+    verifiedExtraction: true
   };
 }
 
 const fetchAutomaticHistoryBase = fetchAutomaticHistory;
 fetchAutomaticHistory = async function(street, city) {
   let wikipediaResult = null;
-  try { wikipediaResult = await fetchAutomaticHistoryBase(street, city); } catch (error) { console.warn('Wikipedia/Wikidata enrichment failed:', error); }
+  try {
+    wikipediaResult = await fetchAutomaticHistoryBase(street, city);
+  } catch (error) {
+    console.warn('Wikipedia/Wikidata enrichment failed:', error);
+  }
+
   let municipalResult = null;
-  try { municipalResult = await fetchMunicipalGuideHistory(street, city); } catch (error) { console.warn('Municipal guide enrichment failed:', error); }
+  try {
+    municipalResult = await fetchMunicipalGuideHistory(street, city);
+  } catch (error) {
+    console.warn('Municipal guide enrichment failed:', error);
+  }
+
   if (!municipalResult) return wikipediaResult;
   if (!wikipediaResult) return municipalResult;
+
   const wikiOriginUseful = wikipediaResult.origin && !wikipediaResult.origin.includes('לא נמצא');
   return {
     ...wikipediaResult,
     origin: wikiOriginUseful ? wikipediaResult.origin : municipalResult.origin,
-    foundedYear: wikipediaResult.foundedYear || municipalResult.foundedYear,
-    namedYear: wikipediaResult.namedYear || municipalResult.namedYear,
+    foundedYear: municipalResult.foundedYear || wikipediaResult.foundedYear || null,
+    namedYear: municipalResult.namedYear || wikipediaResult.namedYear || null,
     formerNames: municipalResult.formerNames.length ? municipalResult.formerNames : (wikipediaResult.formerNames || []),
     description: municipalResult.description || wikipediaResult.description,
-    sources: [...municipalResult.sources, ...(wikipediaResult.sources || [])],
+    sources: uniqueSources([...(municipalResult.sources || []), ...(wikipediaResult.sources || [])]),
     automatic: true,
-    municipalGuide: true
+    municipalGuide: true,
+    verifiedExtraction: true
   };
 };
