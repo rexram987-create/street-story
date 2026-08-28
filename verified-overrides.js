@@ -12,7 +12,7 @@
   function canonical(value) {
     return String(value || '')
       .replace(/["׳״'־-]/g, '')
-      .replace(/^(רחוב|שדרות|שדרה)\s+/u, '')
+      .replace(/^(רחוב|שדרות|שדרה|דרך)\s+/u, '')
       .replace(/\s+/g, ' ')
       .trim()
       .toLowerCase();
@@ -26,6 +26,11 @@
   function isBenGurion(value) {
     const name = canonical(value);
     return name === 'דוד בן גוריון' || name === 'בן גוריון';
+  }
+
+  function isBegin(value) {
+    const name = canonical(value);
+    return name === 'בגין' || name === 'מנחם בגין';
   }
 
   function addSourceOnce(label, url) {
@@ -66,17 +71,44 @@
     return true;
   }
 
+  function applyBeginOverride() {
+    if (!isTelAviv(cityInput.value) || !isBegin(streetInput.value)) return false;
+    if (resultCard.classList.contains('hidden')) return false;
+
+    const origin = document.getElementById('nameOrigin');
+    const namedYear = document.getElementById('namedYear');
+    const formerNames = document.getElementById('formerNames');
+    const description = document.getElementById('streetDescription');
+
+    if (origin) {
+      origin.textContent = 'דרך מנחם בגין נקראת על שמו של מנחם בגין (1913–1992), ראש ממשלת ישראל השישי וחתן פרס נובל לשלום.';
+    }
+    if (namedYear) namedYear.textContent = '2001';
+    if (formerNames) formerNames.textContent = 'דרך פתח תקווה; בתקופת המנדט: דרך הביטחון';
+    if (description) {
+      description.textContent = 'דרך מנחם בגין נקראה עד לשנת 2001 דרך פתח תקווה. היא התפתחה כחלק מן הציר ההיסטורי שחיבר את יפו ופתח תקווה. בתקופת המנדט נודעה גם בשם „דרך הביטחון”, ולאחר מכן בשם דרך פתח תקווה. בשנת 2001 נקראה הדרך על שמו של מנחם בגין.';
+    }
+
+    addSourceOnce('עיריית תל אביב-יפו — מסמך מדיניות מרחב המשולש בגין–המסגר–יצחק שדה', 'https://gisn.tel-aviv.gov.il/taba_raster/9107_MD.pdf');
+    return true;
+  }
+
+  function applyVerifiedOverride() {
+    return applyBenGurionOverride() || applyBeginOverride();
+  }
+
   form.addEventListener('submit', () => {
-    if (!isTelAviv(cityInput.value) || !isBenGurion(streetInput.value)) return;
+    if (!isTelAviv(cityInput.value)) return;
+    if (!isBenGurion(streetInput.value) && !isBegin(streetInput.value)) return;
 
     let attempts = 0;
     const timer = setInterval(() => {
       attempts += 1;
-      applyBenGurionOverride();
+      applyVerifiedOverride();
       if (attempts >= 40) clearInterval(timer);
     }, 250);
   });
 
   // Also handle a result that is already visible when this script loads.
-  applyBenGurionOverride();
+  applyVerifiedOverride();
 })();
