@@ -1,5 +1,5 @@
-const CACHE_NAME = 'street-story-v10';
-const APP_SHELL = ['./', './index.html', './styles.css?v=10', './app.js?v=10', './fixes.js?v=10', './verified-overrides.js?v=10', './manifest.webmanifest'];
+const CACHE_NAME = 'street-story-v11';
+const APP_SHELL = ['./', './index.html', './styles.css?v=11', './app.js?v=11', './fixes.js?v=11', './source-validation.js?v=11', './verified-overrides.js?v=11', './manifest.webmanifest'];
 
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(APP_SHELL)));
