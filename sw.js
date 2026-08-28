@@ -1,4 +1,4 @@
-const CACHE_NAME = 'street-story-v4';
+const CACHE_NAME = 'street-story-v5';
 const APP_SHELL = ['./', './index.html', './styles.css', './app.js', './fixes.js', './manifest.webmanifest'];
 
 self.addEventListener('install', event => {
