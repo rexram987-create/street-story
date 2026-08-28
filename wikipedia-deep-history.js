@@ -35,20 +35,23 @@
     return cleanText(text)
       .split(/(?<=[.!?])\s+(?=[א-ת"׳״])/u)
       .map(item => item.trim())
-      .filter(item => item.length >= 15 && item.length <= 700);
+      .filter(item => item.length >= 15 && item.length <= 800);
   }
 
   function explicitOriginSentence(text) {
     const candidates = sentences(text);
-    const strong = candidates.find(sentence =>
-      /(?:הרחוב|השדרה|הדרך|הכיכר|הסמטה).{0,45}(?:נקרא|נקראת|נקראו|קרוי|קרויה).{0,45}(?:על שם|על־שם)/u.test(sentence) ||
-      /(?:מקור|מקורו|מקורה)\s+(?:של\s+)?(?:שם|השם|שמו|שמה)/u.test(sentence)
-    );
-    if (strong) return strong;
+    const patterns = [
+      /(?:הרחוב|השדרה|הדרך|הכיכר|הסמטה).{0,100}?(?:נקרא|נקראת|נקראו|קרוי|קרויה).{0,100}?(?:על שם|על־שם|על שום)/u,
+      /(?:שמו|שמה|השם)\s+(?:של\s+)?(?:הרחוב|השדרה|הדרך).{0,100}?(?:על שם|על־שם|על שום|משום|מפני|כיוון ש)/u,
+      /(?:נקרא|נקראת|קרוי|קרויה).{0,120}?(?:משום|מפני|כיוון ש|על שום|על שם|על־שם)/u,
+      /(?:מקור|מקורו|מקורה)\s+(?:של\s+)?(?:שם|השם|שמו|שמה)/u
+    ];
 
-    return candidates.find(sentence =>
-      /(?:נקרא|נקראת|קרוי|קרויה).{0,80}(?:משום|מפני|כיוון ש|על שום|על שם|על־שם)/u.test(sentence)
-    ) || null;
+    for (const pattern of patterns) {
+      const found = candidates.find(sentence => pattern.test(sentence));
+      if (found) return found;
+    }
+    return null;
   }
 
   function explicitNamedYear(text) {
@@ -59,9 +62,10 @@
 
     const source = cleanText(text);
     const patterns = [
-      /(?:הוענק|ניתן|נקבע)\s+(?:לרחוב|לשדרה|לדרך)?\s*(?:השם|שמו|שמה)[^.!?]{0,100}?(?:בשנת|ב־|ב-)\s*(18\d{2}|19\d{2}|20\d{2})/u,
-      /(?:בשנת|ב־|ב-)\s*(18\d{2}|19\d{2}|20\d{2})[^.!?]{0,100}?(?:הוענק|ניתן|נקבע)\s+(?:לרחוב|לשדרה|לדרך)?\s*(?:השם|שמו|שמה)/u,
-      /(?:נקרא|נקראה|נקראת)\s+(?:הרחוב|השדרה|הדרך)?[^.!?]{0,100}?(?:בשנת|ב־|ב-)\s*(18\d{2}|19\d{2}|20\d{2})/u
+      /(?:הוענק|ניתן|נקבע)\s+(?:לרחוב|לשדרה|לדרך)?\s*(?:השם|שמו|שמה)[^.!?]{0,120}?(?:בשנת|ב־|ב-)\s*(18\d{2}|19\d{2}|20\d{2})/u,
+      /(?:בשנת|ב־|ב-)\s*(18\d{2}|19\d{2}|20\d{2})[^.!?]{0,120}?(?:הוענק|ניתן|נקבע)\s+(?:לרחוב|לשדרה|לדרך)?\s*(?:השם|שמו|שמה)/u,
+      /(?:נקרא|נקראה|נקראת)\s+(?:הרחוב|השדרה|הדרך)?[^.!?]{0,120}?(?:בשנת|ב־|ב-)\s*(18\d{2}|19\d{2}|20\d{2})/u,
+      /(?:השם|שמו|שמה)\s+[^.!?]{0,80}?(?:נקבע|התקבע|ניתן)[^.!?]{0,80}?(?:בשנת|ב־|ב-)\s*(18\d{2}|19\d{2}|20\d{2})/u
     ];
     for (const pattern of patterns) {
       const match = source.match(pattern);
@@ -71,9 +75,23 @@
   }
 
   function explicitFoundedYear(text) {
-    return typeof extractExplicitFoundedYear === 'function'
-      ? extractExplicitFoundedYear(text)
-      : null;
+    if (typeof extractExplicitFoundedYear === 'function') {
+      const year = extractExplicitFoundedYear(text);
+      if (year) return year;
+    }
+
+    const source = cleanText(text);
+    const patterns = [
+      /(?:בשנת|ב־|ב-)\s*(18\d{2}|19\d{2}|20\d{2})[^.!?]{0,120}?(?:נסלל[ה]?|נפתח[ה]?|החלה?\s+סלילת|החלו\s+בסלילת|הושלמה\s+סלילת|הסתיימה\s+סלילת|הוכשרה?)[^.!?]{0,80}?(?:הרחוב|השדרה|הדרך)/u,
+      /(?:הרחוב|השדרה|הדרך)[^.!?]{0,100}?(?:נסלל[ה]?|נפתח[ה]?|הוכשרה?|הושלמה\s+סלילתה|הסתיימה\s+סלילתה)[^.!?]{0,100}?(?:בשנת|ב־|ב-)\s*(18\d{2}|19\d{2}|20\d{2})/u,
+      /(?:סלילת|סלילתו|סלילתה)\s+(?:של\s+)?(?:הרחוב|השדרה|הדרך)[^.!?]{0,100}?(?:החלה|החלה בשנת|הושלמה|הסתיימה)[^.!?]{0,60}?(18\d{2}|19\d{2}|20\d{2})/u,
+      /(?:הושלמה|הסתיימה)\s+סלילת\s+(?:הרחוב|השדרה|הדרך)[^.!?]{0,80}?(?:בשנת|ב־|ב-)?\s*(18\d{2}|19\d{2}|20\d{2})/u
+    ];
+    for (const pattern of patterns) {
+      const match = source.match(pattern);
+      if (match?.[1]) return match[1];
+    }
+    return null;
   }
 
   function explicitFormerNames(text) {
@@ -84,7 +102,8 @@
     const source = cleanText(text);
     const extraPatterns = [
       /(?:שונה|הוחלף|הוסב)\s+(?:שמו|שמה)\s+(?:ל|אל)\s*["״']?([^"״'.;]{2,70})["״']?/gu,
-      /(?:לשנות|להחליף|להסב)\s+את\s+(?:שמו|שמה)\s+(?:ל|אל)\s*["״']?([^"״'.;]{2,70})["״']?/gu
+      /(?:לשנות|להחליף|להסב)\s+את\s+(?:שמו|שמה)\s+(?:ל|אל)\s*["״']?([^"״'.;]{2,70})["״']?/gu,
+      /(?:נקרא|נקראה)\s+(?:אז|באותה תקופה|לזמן קצר|במשך תקופה)\s+["״']?([^"״'.;]{2,70})["״']?/gu
     ];
 
     for (const pattern of extraPatterns) {
@@ -107,7 +126,7 @@
       format: 'json',
       origin: '*'
     });
-    const data = await fetchJson(`${WP_API}?${params}`, `wp-full-v18:${title}`);
+    const data = await fetchJson(`${WP_API}?${params}`, `wp-full-v19:${title}`);
     const page = Object.values(data?.query?.pages || {})[0];
     if (!page || page.missing !== undefined || !page.extract) return null;
     return { title: page.title, text: cleanText(page.extract), url: page.fullurl };
