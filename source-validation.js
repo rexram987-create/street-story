@@ -1,10 +1,17 @@
 // Source validation and priority layer loaded after fixes.js.
-// Tel Aviv rule: municipal naming guide first; Wikipedia/Wikidata only fills gaps.
+// Tel Aviv rule: ALWAYS query the municipal naming guide first, then Wikipedia/Wikidata.
+// Municipal data keeps priority; Wikipedia/Wikidata enrich missing fields and sources.
 
 (function () {
   if (typeof fetchAutomaticHistory !== 'function') return;
 
   const previousFetchAutomaticHistory = fetchAutomaticHistory;
+  // fixes.js keeps a reference to app.js's original Wikipedia/Wikidata pipeline.
+  // Prefer it here so we do not re-run the municipal guide a second time.
+  const wikipediaWikidataFetch = (typeof fetchAutomaticHistoryBase === 'function')
+    ? fetchAutomaticHistoryBase
+    : previousFetchAutomaticHistory;
+
   const GUIDE_API = 'https://he.wikisource.org/w/api.php';
   const GUIDE_ROOT = 'מדריך רחובות תל אביב יפו';
 
@@ -55,9 +62,6 @@
     const section = [...new Set(words(cleanHeading(line)))];
     if (!target.length || !section.length) return -1;
 
-    // The municipal guide often writes people as "surname given-name"
-    // while users naturally type "given-name surname". Match as a token set,
-    // not as one ordered string.
     const matched = target.filter(token => section.includes(token)).length;
     if (matched !== target.length) return -1;
 
@@ -70,8 +74,6 @@
   }
 
   function guideLettersForStreet(street) {
-    // Search every plausible initial because the guide may index a person's
-    // entry by surname, e.g. "סוקולוב נחום", although the user typed "נחום סוקולוב".
     return [...new Set(words(street).map(token => token[0]).filter(letter => /[א-ת]/u.test(letter)))];
   }
 
@@ -80,7 +82,7 @@
     const params = new URLSearchParams({
       action: 'parse', page: pageTitle, prop: 'sections', format: 'json', origin: '*'
     });
-    const data = await fetchJson(`${GUIDE_API}?${params}`, `ws-guide-flex-sections-v15:${pageTitle}`);
+    const data = await fetchJson(`${GUIDE_API}?${params}`, `ws-guide-flex-sections-v16:${pageTitle}`);
     return { pageTitle, sections: data?.parse?.sections || [] };
   }
 
@@ -117,7 +119,7 @@
     });
     const sectionData = await fetchJson(
       `${GUIDE_API}?${sectionParams}`,
-      `ws-guide-flex-section-v15:${best.pageTitle}:${best.section.index}`
+      `ws-guide-flex-section-v16:${best.pageTitle}:${best.section.index}`
     );
 
     let text = typeof htmlToPlainText === 'function'
@@ -159,7 +161,6 @@
     };
   }
 
-  // Replace the older ordered-name lookup with the flexible municipal lookup.
   fetchMunicipalGuideHistory = fetchFlexibleMunicipalGuideHistory;
 
   function sanitizeWikidataOrigin(origin, street) {
@@ -184,17 +185,10 @@
     return `${prefix}${matching.join(', ')}.`;
   }
 
-  function municipalIsComplete(municipal) {
-    if (!municipal) return false;
-    return isUsefulText(municipal.origin) &&
-      isUsefulText(municipal.description) &&
-      Boolean(municipal.foundedYear || municipal.namedYear || municipal.formerNames?.length);
-  }
-
   fetchAutomaticHistory = async function(street, city) {
     const telAviv = typeof isTelAvivCity === 'function' && isTelAvivCity(city);
 
-    // 1) Municipal guide is always queried first for Tel Aviv.
+    // STEP 1: municipal guide. Never return early; Wikipedia/Wikidata is still checked afterwards.
     let municipal = null;
     if (telAviv) {
       try {
@@ -204,28 +198,28 @@
       }
     }
 
-    if (municipalIsComplete(municipal)) {
-      return {
-        ...municipal,
-        sourceValidated: true,
-        lookupOrder: ['municipal-guide']
-      };
-    }
-
-    // 2) Wikipedia/Wikidata only fill what the guide did not provide.
+    // STEP 2 + 3: Wikipedia article first, then its Wikidata entity (the original app pipeline).
     let fallback = null;
     try {
-      fallback = await previousFetchAutomaticHistory(street, city);
+      fallback = await wikipediaWikidataFetch(street, city);
     } catch (error) {
-      console.warn('Wikipedia/Wikidata fallback failed:', error);
+      console.warn('Wikipedia/Wikidata enrichment failed:', error);
     }
     if (fallback?.origin) fallback.origin = sanitizeWikidataOrigin(fallback.origin, street);
 
-    if (!municipal) {
-      if (fallback) fallback.lookupOrder = ['municipal-guide', 'wikipedia-wikidata'];
+    // Outside Tel Aviv there is no municipal guide layer, so use the public fallback directly.
+    if (!telAviv) {
+      if (fallback) fallback.lookupOrder = ['wikipedia', 'wikidata'];
       return fallback;
     }
 
+    if (!municipal) {
+      if (fallback) fallback.lookupOrder = ['municipal-guide', 'wikipedia', 'wikidata'];
+      return fallback;
+    }
+
+    // Municipal guide has priority for any field it actually provides.
+    // Wikipedia/Wikidata still contributes missing fields and remains visible in Sources.
     return {
       ...(fallback || {}),
       origin: isUsefulText(municipal.origin) ? municipal.origin : fallback?.origin,
@@ -238,7 +232,7 @@
       municipalGuide: true,
       sourceValidated: true,
       flexibleNameMatch: true,
-      lookupOrder: ['municipal-guide', 'wikipedia-wikidata']
+      lookupOrder: ['municipal-guide', 'wikipedia', 'wikidata']
     };
   };
 })();
