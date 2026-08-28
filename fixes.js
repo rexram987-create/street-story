@@ -23,7 +23,7 @@ if (pilotData['רוטשילד']) {
 function canonicalStreetText(value) {
   return String(value || '')
     .replace(/["׳״'־-]/g, '')
-    .replace(/^(רחוב|שדרות|שדרה)\s+/u, '')
+    .replace(/^(רחוב|שדרות|שדרה|סמטת|סמטה|דרך)\s+/u, '')
     .replace(/\s+/g, ' ')
     .trim()
     .toLowerCase();
@@ -42,12 +42,13 @@ isLikelyStreetArticle = function(title, street, city) {
 // from what the user typed. Requests remain throttled to respect Nominatim usage.
 geocodeStreet = async function(street, city) {
   const base = String(street || '').trim();
-  const stripped = base.replace(/^(רחוב|שדרות|שדרה)\s+/u, '').trim();
+  const stripped = base.replace(/^(רחוב|שדרות|שדרה|סמטת|סמטה|דרך)\s+/u, '').trim();
   const candidates = [...new Set([
     base,
     stripped,
     `רחוב ${stripped}`,
-    `שדרות ${stripped}`
+    `שדרות ${stripped}`,
+    `דרך ${stripped}`
   ].filter(Boolean))];
 
   for (const candidate of candidates) {
@@ -82,4 +83,122 @@ geocodeStreet = async function(street, city) {
   }
 
   return null;
+};
+
+// Tel Aviv's official street guide says its information may be reused freely with
+// attribution to the municipality. Wikisource hosts a searchable transcription of
+// that guide, which lets the browser retrieve one street section without an API key.
+const WIKISOURCE_API = 'https://he.wikisource.org/w/api.php';
+const MUNICIPAL_GUIDE_WIKISOURCE = 'מדריך רחובות תל אביב יפו';
+
+function isTelAvivCity(city) {
+  const normalized = String(city || '').replace(/[־-]/g, ' ').replace(/\s+/g, ' ').trim();
+  return normalized === 'תל אביב יפו' || normalized === 'תל אביב';
+}
+
+function firstHebrewLetterForGuide(street) {
+  const stripped = canonicalStreetText(street);
+  const match = stripped.match(/[א-ת]/u);
+  return match ? match[0] : null;
+}
+
+function sectionMatchesStreet(sectionLine, street) {
+  const section = canonicalStreetText(sectionLine);
+  const target = canonicalStreetText(street);
+  if (!section || !target) return false;
+  return section === target || section.includes(target) || target.includes(section);
+}
+
+function htmlToPlainText(html) {
+  const doc = new DOMParser().parseFromString(html || '', 'text/html');
+  return (doc.body?.textContent || '').replace(/\s+/g, ' ').trim();
+}
+
+async function fetchMunicipalGuideHistory(street, city) {
+  if (!isTelAvivCity(city)) return null;
+
+  const letter = firstHebrewLetterForGuide(street);
+  if (!letter) return null;
+
+  const pageTitle = `${MUNICIPAL_GUIDE_WIKISOURCE}/${letter}`;
+  const sectionsParams = new URLSearchParams({
+    action: 'parse',
+    page: pageTitle,
+    prop: 'sections',
+    format: 'json',
+    origin: '*'
+  });
+
+  try {
+    const sectionsData = await fetchJson(
+      `${WIKISOURCE_API}?${sectionsParams}`,
+      `ws-guide-sections:${letter}`
+    );
+    const sections = sectionsData?.parse?.sections || [];
+    const matched = sections.find(item => sectionMatchesStreet(item.line, street));
+    if (!matched) return null;
+
+    const sectionParams = new URLSearchParams({
+      action: 'parse',
+      page: pageTitle,
+      section: matched.index,
+      prop: 'text',
+      format: 'json',
+      origin: '*'
+    });
+    const sectionData = await fetchJson(
+      `${WIKISOURCE_API}?${sectionParams}`,
+      `ws-guide-section:${pageTitle}:${matched.index}`
+    );
+    const html = sectionData?.parse?.text?.['*'] || '';
+    let text = htmlToPlainText(html);
+    if (!text) return null;
+
+    // Remove edit labels and repeated heading noise while retaining the municipal explanation.
+    text = text.replace(/\[עריכה\]/g, '').replace(/\s+/g, ' ').trim();
+    const explanation = text.slice(0, 1100);
+    const sourceUrl = `https://he.wikisource.org/wiki/${encodeURIComponent(pageTitle).replace(/%2F/g, '/')}`;
+
+    return {
+      origin: `לפי מדריך הרחובות של עיריית תל אביב-יפו: ${explanation.slice(0, 520)}`,
+      foundedYear: null,
+      namedYear: null,
+      formerNames: [],
+      description: explanation,
+      sources: [
+        { label: 'מדריך הרחובות של עיריית תל אביב-יפו', url: CITY_GUIDE },
+        { label: `ויקיטקסט — תעתיק מדריך הרחובות (${matched.line})`, url: sourceUrl }
+      ],
+      automatic: true,
+      municipalGuide: true
+    };
+  } catch (error) {
+    console.warn('Municipal guide enrichment failed:', error);
+    return null;
+  }
+}
+
+const fetchAutomaticHistoryBase = fetchAutomaticHistory;
+fetchAutomaticHistory = async function(street, city) {
+  const wikipediaResult = await fetchAutomaticHistoryBase(street, city);
+
+  // Prefer the municipal naming guide when Wikipedia/Wikidata could not establish
+  // the origin of the street name. Keep useful Wikipedia details when available.
+  const needsMunicipalOrigin = !wikipediaResult ||
+    !wikipediaResult.origin ||
+    wikipediaResult.origin.includes('לא נמצא ב-Wikidata');
+
+  if (!needsMunicipalOrigin) return wikipediaResult;
+
+  const municipalResult = await fetchMunicipalGuideHistory(street, city);
+  if (!municipalResult) return wikipediaResult;
+  if (!wikipediaResult) return municipalResult;
+
+  return {
+    ...wikipediaResult,
+    origin: municipalResult.origin,
+    description: wikipediaResult.description || municipalResult.description,
+    sources: [...municipalResult.sources, ...(wikipediaResult.sources || [])],
+    municipalGuide: true
+  };
 };
