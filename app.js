@@ -19,6 +19,11 @@ const fields = {
 };
 
 const CITY_GUIDE = 'https://www.tel-aviv.gov.il/Visitors/KnowTelAviv/Pages/streets.aspx';
+const OSM_URL = 'https://www.openstreetmap.org/';
+const WIKIPEDIA_API = 'https://he.wikipedia.org/w/api.php';
+const WIKIDATA_API = 'https://www.wikidata.org/w/api.php';
+const CACHE_TTL = 7 * 24 * 60 * 60 * 1000;
+let lastNominatimRequest = 0;
 
 const pilotData = {
   'ביאליק': {
@@ -95,12 +100,218 @@ function unavailable(value) {
   return value ?? 'לא נמצא במקורות שנבדקו';
 }
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function cacheGet(key) {
+  try {
+    const raw = localStorage.getItem(`street-story:${key}`);
+    if (!raw) return null;
+    const item = JSON.parse(raw);
+    if (Date.now() - item.savedAt > CACHE_TTL) {
+      localStorage.removeItem(`street-story:${key}`);
+      return null;
+    }
+    return item.value;
+  } catch {
+    return null;
+  }
+}
+
+function cacheSet(key, value) {
+  try {
+    localStorage.setItem(`street-story:${key}`, JSON.stringify({ savedAt: Date.now(), value }));
+  } catch {
+    // The app still works when local storage is unavailable.
+  }
+}
+
 async function geocodeStreet(street, city) {
-  const params = new URLSearchParams({ street, city, country: 'Israel', format: 'jsonv2', limit: '1', addressdetails: '1' });
-  const response = await fetch(`https://nominatim.openstreetmap.org/search?${params.toString()}`, { headers: { 'Accept-Language': 'he,en' } });
+  const cacheKey = `geo:${city}:${street}`;
+  const cached = cacheGet(cacheKey);
+  if (cached) return cached;
+
+  const wait = Math.max(0, 1100 - (Date.now() - lastNominatimRequest));
+  if (wait) await sleep(wait);
+  lastNominatimRequest = Date.now();
+
+  const params = new URLSearchParams({
+    street,
+    city,
+    country: 'Israel',
+    format: 'jsonv2',
+    limit: '1',
+    addressdetails: '1'
+  });
+
+  const response = await fetch(`https://nominatim.openstreetmap.org/search?${params.toString()}`, {
+    headers: { 'Accept-Language': 'he,en' }
+  });
   if (!response.ok) throw new Error('שירות המפות אינו זמין כרגע.');
   const data = await response.json();
-  return data[0] || null;
+  const result = data[0] || null;
+  if (result) cacheSet(cacheKey, result);
+  return result;
+}
+
+async function fetchJson(url, cacheKey) {
+  const cached = cacheGet(cacheKey);
+  if (cached) return cached;
+  const response = await fetch(url);
+  if (!response.ok) throw new Error('מקור מידע חיצוני אינו זמין כרגע.');
+  const data = await response.json();
+  cacheSet(cacheKey, data);
+  return data;
+}
+
+function buildWikipediaSearchQueries(street, city) {
+  const shortCity = city.replace('-יפו', '').trim();
+  return [
+    `רחוב ${street} ${shortCity}`,
+    `${street} (${shortCity})`,
+    `${street} ${shortCity}`
+  ];
+}
+
+function isLikelyStreetArticle(title, street, city) {
+  const normalizedTitle = title.replace(/["׳״']/g, '').toLowerCase();
+  const normalizedStreet = street.replace(/["׳״']/g, '').toLowerCase();
+  const shortCity = city.replace('-יפו', '').trim().toLowerCase();
+  return normalizedTitle.includes(normalizedStreet) &&
+    (normalizedTitle.includes('רחוב') || normalizedTitle.includes(shortCity));
+}
+
+async function searchWikipediaStreet(street, city) {
+  for (const query of buildWikipediaSearchQueries(street, city)) {
+    const params = new URLSearchParams({
+      action: 'query',
+      list: 'search',
+      srsearch: query,
+      srlimit: '5',
+      srnamespace: '0',
+      format: 'json',
+      origin: '*'
+    });
+    const data = await fetchJson(`${WIKIPEDIA_API}?${params}`, `wp-search:${query}`);
+    const matches = data?.query?.search || [];
+    const preferred = matches.find(item => isLikelyStreetArticle(item.title, street, city));
+    if (preferred) return preferred.title;
+  }
+  return null;
+}
+
+async function fetchWikipediaArticle(title) {
+  const params = new URLSearchParams({
+    action: 'query',
+    prop: 'extracts|info|pageprops',
+    exintro: '1',
+    explaintext: '1',
+    inprop: 'url',
+    titles: title,
+    format: 'json',
+    origin: '*'
+  });
+  const data = await fetchJson(`${WIKIPEDIA_API}?${params}`, `wp-page:${title}`);
+  const page = Object.values(data?.query?.pages || {})[0];
+  if (!page || page.missing !== undefined) return null;
+  return {
+    title: page.title,
+    extract: page.extract || '',
+    url: page.fullurl,
+    wikidataId: page.pageprops?.wikibase_item || null
+  };
+}
+
+async function fetchWikidataEntity(id) {
+  if (!id) return null;
+  const params = new URLSearchParams({
+    action: 'wbgetentities',
+    ids: id,
+    props: 'labels|descriptions|claims|sitelinks',
+    languages: 'he|en',
+    languagefallback: '1',
+    format: 'json',
+    origin: '*'
+  });
+  const data = await fetchJson(`${WIKIDATA_API}?${params}`, `wd-entity:${id}`);
+  return data?.entities?.[id] || null;
+}
+
+async function fetchWikidataLabels(ids) {
+  const uniqueIds = [...new Set(ids.filter(Boolean))];
+  if (!uniqueIds.length) return {};
+  const params = new URLSearchParams({
+    action: 'wbgetentities',
+    ids: uniqueIds.join('|'),
+    props: 'labels',
+    languages: 'he|en',
+    languagefallback: '1',
+    format: 'json',
+    origin: '*'
+  });
+  const data = await fetchJson(`${WIKIDATA_API}?${params}`, `wd-labels:${uniqueIds.sort().join(',')}`);
+  const labels = {};
+  Object.entries(data?.entities || {}).forEach(([id, entity]) => {
+    labels[id] = entity.labels?.he?.value || entity.labels?.en?.value || id;
+  });
+  return labels;
+}
+
+function claimEntityIds(entity, property) {
+  return (entity?.claims?.[property] || [])
+    .map(claim => claim?.mainsnak?.datavalue?.value?.id)
+    .filter(Boolean);
+}
+
+function claimYear(entity, property) {
+  const time = entity?.claims?.[property]?.[0]?.mainsnak?.datavalue?.value?.time;
+  if (!time) return null;
+  const match = time.match(/^([+-]\d{4,})-/);
+  if (!match) return null;
+  return String(Math.abs(Number(match[1])));
+}
+
+function cleanExtract(text) {
+  return text.replace(/\s+/g, ' ').trim().slice(0, 900);
+}
+
+async function fetchAutomaticHistory(street, city) {
+  try {
+    const title = await searchWikipediaStreet(street, city);
+    if (!title) return null;
+
+    const article = await fetchWikipediaArticle(title);
+    if (!article) return null;
+
+    const entity = await fetchWikidataEntity(article.wikidataId);
+    const namedAfterIds = claimEntityIds(entity, 'P138');
+    const namedAfterLabels = await fetchWikidataLabels(namedAfterIds);
+    const namedAfter = namedAfterIds.map(id => namedAfterLabels[id]).filter(Boolean);
+    const inceptionYear = claimYear(entity, 'P571');
+
+    const sources = [
+      { label: `ויקיפדיה — ${article.title}`, url: article.url }
+    ];
+    if (article.wikidataId) {
+      sources.push({ label: `Wikidata — ${article.wikidataId}`, url: `https://www.wikidata.org/wiki/${article.wikidataId}` });
+    }
+
+    return {
+      origin: namedAfter.length
+        ? `לפי Wikidata, הרחוב נקרא על שם ${namedAfter.join(', ')}.`
+        : 'לא נמצא ב-Wikidata שדה מאומת המציין על שם מי נקרא הרחוב.',
+      foundedYear: inceptionYear,
+      namedYear: null,
+      formerNames: [],
+      description: cleanExtract(article.extract) || 'נמצא ערך מתאים בוויקיפדיה, אך לא נמצא בו תקציר זמין.',
+      sources,
+      automatic: true
+    };
+  } catch (error) {
+    console.warn('Automatic enrichment failed:', error);
+    return null;
+  }
 }
 
 function renderSources(items) {
@@ -127,13 +338,15 @@ function renderResult(street, city, geo, historical) {
   fields.nameOrigin.textContent = historical?.origin || 'עדיין לא נמצא מידע מאומת על מקור השם';
   fields.foundedYear.textContent = unavailable(historical?.foundedYear);
   fields.namedYear.textContent = unavailable(historical?.namedYear);
-  fields.formerNames.textContent = historical?.formerNames?.length ? historical.formerNames.join(', ') : 'לא נמצאו שמות קודמים במקורות שנבדקו';
-  fields.streetDescription.textContent = historical?.description || 'הרחוב אותר במפה. מידע היסטורי מפורט עדיין לא קיים במאגר הפיילוט.';
+  fields.formerNames.textContent = historical?.formerNames?.length
+    ? historical.formerNames.join(', ')
+    : 'לא נמצאו שמות קודמים במקורות שנבדקו';
+  fields.streetDescription.textContent = historical?.description || 'הרחוב אותר במפה, אך עדיין לא נמצא עליו מידע היסטורי מאומת במקורות האוטומטיים.';
   fields.locationText.textContent = geo.display_name;
   fields.mapLink.href = `https://www.openstreetmap.org/?mlat=${encodeURIComponent(geo.lat)}&mlon=${encodeURIComponent(geo.lon)}#map=17/${encodeURIComponent(geo.lat)}/${encodeURIComponent(geo.lon)}`;
 
   const sources = [...(historical?.sources || [])];
-  sources.push({ label: 'OpenStreetMap — מיקום הרחוב', url: 'https://www.openstreetmap.org/' });
+  sources.push({ label: 'OpenStreetMap — מיקום הרחוב', url: OSM_URL });
   renderSources(sources);
   resultCard.classList.remove('hidden');
 }
@@ -151,8 +364,19 @@ form.addEventListener('submit', async event => {
       statusBox.textContent = 'לא מצאתי רחוב כזה בעיר שנבחרה. כדאי לבדוק את האיות ולנסות שוב.';
       return;
     }
-    statusBox.textContent = pilotData[street] ? 'הרחוב נמצא והמידע ההיסטורי המאומת נטען.' : 'הרחוב נמצא. עדיין אין עליו מידע היסטורי מלא בפיילוט.';
-    renderResult(street, city, geo, pilotData[street]);
+
+    let historical = pilotData[street];
+    if (historical) {
+      statusBox.textContent = 'הרחוב נמצא והמידע ההיסטורי המאומת נטען.';
+    } else {
+      statusBox.textContent = 'הרחוב נמצא. מחפש מידע אוטומטי בוויקיפדיה וב-Wikidata…';
+      historical = await fetchAutomaticHistory(street, city);
+      statusBox.textContent = historical
+        ? 'הרחוב נמצא ונוסף מידע ממקורות ציבוריים.'
+        : 'הרחוב נמצא, אך לא נמצא עליו מידע היסטורי מאומת במקורות האוטומטיים.';
+    }
+
+    renderResult(street, city, geo, historical);
   } catch (error) {
     statusBox.textContent = error.message || 'אירעה שגיאה בחיפוש.';
   }
@@ -170,7 +394,13 @@ speakButton.addEventListener('click', () => {
     return;
   }
   window.speechSynthesis.cancel();
-  const text = [fields.title.textContent, `מקור השם: ${fields.nameOrigin.textContent}`, `שנת סלילה או ייסוד: ${fields.foundedYear.textContent}`, `שנת מתן השם: ${fields.namedYear.textContent}`, `שמות קודמים: ${fields.formerNames.textContent}`, fields.streetDescription.textContent].join('. ');
+  const text = [
+    fields.title.textContent,
+    `מקור השם: ${fields.nameOrigin.textContent}`,
+    `שנת סלילה או ייסוד: ${fields.foundedYear.textContent}`,
+    `שנת מתן השם: ${fields.namedYear.textContent}`,
+    fields.streetDescription.textContent
+  ].join('. ');
   const utterance = new SpeechSynthesisUtterance(text);
   utterance.lang = 'he-IL';
   window.speechSynthesis.speak(utterance);
