@@ -1,5 +1,5 @@
-// Source validation layer loaded after fixes.js.
-// Municipal naming-guide data outranks generic Wikidata P138 output for Tel Aviv streets.
+// Source validation and priority layer loaded after fixes.js.
+// For Tel Aviv streets: municipal naming guide first, Wikipedia/Wikidata only as fallback.
 
 (function () {
   if (typeof fetchAutomaticHistory !== 'function') return;
@@ -36,9 +36,6 @@
     return base.split(' ').filter(token => token.length >= 2);
   }
 
-  // Generic safeguard for Wikidata P138: when several "named after" entities are returned,
-  // keep only the entity whose label actually matches the street name. This prevents cases
-  // such as "מנחם בגין, פתח תקווה" for a search for בגין.
   function sanitizeWikidataOrigin(origin, street) {
     const text = String(origin || '').trim();
     const prefix = 'לפי Wikidata, הרחוב נקרא על שם ';
@@ -56,60 +53,73 @@
       return keywords.some(keyword => normalized.includes(keyword));
     });
 
-    if (matching.length === 1) {
-      return `${prefix}${matching[0]}.`;
-    }
-
-    // If Wikidata is ambiguous and we cannot identify one matching namesake safely,
-    // do not present a potentially wrong namesake as fact.
-    if (matching.length === 0) {
-      return 'לא נמצא ב-Wikidata שדה חד-משמעי המציין על שם מי נקרא הרחוב.';
-    }
-
+    if (matching.length === 1) return `${prefix}${matching[0]}.`;
+    if (matching.length === 0) return 'לא נמצא ב-Wikidata שדה חד-משמעי המציין על שם מי נקרא הרחוב.';
     return `${prefix}${matching.join(', ')}.`;
   }
 
+  function municipalIsComplete(municipal) {
+    if (!municipal) return false;
+    return isUsefulText(municipal.origin) &&
+      isUsefulText(municipal.description) &&
+      Boolean(municipal.foundedYear || municipal.namedYear || municipal.formerNames?.length);
+  }
+
   fetchAutomaticHistory = async function(street, city) {
-    const combined = await previousFetchAutomaticHistory(street, city);
+    const telAviv = typeof isTelAvivCity === 'function' && isTelAvivCity(city);
 
-    if (combined?.origin) {
-      combined.origin = sanitizeWikidataOrigin(combined.origin, street);
-    }
-
-    // Outside Tel Aviv, keep the existing generic pipeline unchanged apart from the
-    // Wikidata ambiguity safeguard above.
-    if (typeof isTelAvivCity !== 'function' || !isTelAvivCity(city)) return combined;
-    if (typeof fetchMunicipalGuideHistory !== 'function') return combined;
-
+    // 1) Tel Aviv: always query the municipal street guide FIRST.
     let municipal = null;
-    try {
-      municipal = await fetchMunicipalGuideHistory(street, city);
-    } catch (error) {
-      console.warn('Municipal validation failed:', error);
+    if (telAviv && typeof fetchMunicipalGuideHistory === 'function') {
+      try {
+        municipal = await fetchMunicipalGuideHistory(street, city);
+      } catch (error) {
+        console.warn('Municipal guide lookup failed:', error);
+      }
     }
 
-    if (!municipal) return combined;
+    // If the guide gives a sufficiently complete answer, return it immediately.
+    if (municipalIsComplete(municipal)) {
+      return {
+        ...municipal,
+        automatic: true,
+        municipalGuide: true,
+        sourceValidated: true,
+        lookupOrder: ['municipal-guide']
+      };
+    }
 
-    // The municipal street guide is specifically about the naming of Tel Aviv streets,
-    // so its namesake/origin text is safer than a broad Wikidata P138 result.
+    // 2) Only now use Wikipedia/Wikidata to fill missing fields.
+    let fallback = null;
+    try {
+      fallback = await previousFetchAutomaticHistory(street, city);
+    } catch (error) {
+      console.warn('Wikipedia/Wikidata fallback failed:', error);
+    }
+
+    if (fallback?.origin) fallback.origin = sanitizeWikidataOrigin(fallback.origin, street);
+
+    if (!municipal) {
+      if (fallback) fallback.lookupOrder = ['municipal-guide', 'wikipedia-wikidata'];
+      return fallback;
+    }
+
     return {
-      ...(combined || {}),
-      origin: isUsefulText(municipal.origin) ? municipal.origin : combined?.origin,
-      foundedYear: municipal.foundedYear || combined?.foundedYear || null,
-      namedYear: municipal.namedYear || combined?.namedYear || null,
-      formerNames: municipal.formerNames?.length
-        ? municipal.formerNames
-        : (combined?.formerNames || []),
-      description: isUsefulText(municipal.description)
-        ? municipal.description
-        : combined?.description,
+      ...(fallback || {}),
+      // Municipal guide always wins when it has a value.
+      origin: isUsefulText(municipal.origin) ? municipal.origin : fallback?.origin,
+      foundedYear: municipal.foundedYear || fallback?.foundedYear || null,
+      namedYear: municipal.namedYear || fallback?.namedYear || null,
+      formerNames: municipal.formerNames?.length ? municipal.formerNames : (fallback?.formerNames || []),
+      description: isUsefulText(municipal.description) ? municipal.description : fallback?.description,
       sources: uniqueSourceItems([
         ...(municipal.sources || []),
-        ...(combined?.sources || [])
+        ...(fallback?.sources || [])
       ]),
       automatic: true,
       municipalGuide: true,
-      sourceValidated: true
+      sourceValidated: true,
+      lookupOrder: ['municipal-guide', 'wikipedia-wikidata']
     };
   };
 })();
