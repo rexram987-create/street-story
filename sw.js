@@ -1,5 +1,5 @@
-const CACHE_NAME = 'street-story-v24';
-const APP_SHELL = ['./', './index.html', './styles.css?v=24', './app.js?v=24', './fixes.js?v=24', './source-validation.js?v=24', './jerusalem-source.js?v=24', './wikipedia-street-types.js?v=24', './wikipedia-deep-history.js?v=24', './wikipedia-mention-search.js?v=24', './verified-overrides.js?v=24', './manifest.webmanifest'];
+const CACHE_NAME = 'street-story-v25';
+const APP_SHELL = ['./', './index.html', './styles.css?v=25', './app.js?v=25', './fixes.js?v=25', './source-validation.js?v=25', './jerusalem-source.js?v=25', './wikipedia-street-types.js?v=25', './wikipedia-deep-history.js?v=25', './wikipedia-mention-search.js?v=25', './verified-overrides.js?v=25', './manifest.webmanifest'];
 self.addEventListener('install', event => { event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(APP_SHELL))); self.skipWaiting(); });
 self.addEventListener('activate', event => { event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(key => key !== CACHE_NAME).map(key => caches.delete(key))))); self.clients.claim(); });
 self.addEventListener('fetch', event => { if (event.request.method !== 'GET') return; event.respondWith(fetch(event.request).then(response => { const copy=response.clone(); caches.open(CACHE_NAME).then(cache=>cache.put(event.request,copy)); return response; }).catch(()=>caches.match(event.request).then(cached=>cached||caches.match('./index.html')))); });
