@@ -1,11 +1,7 @@
 // Wikipedia street-title compatibility layer.
-// Adds common Israeli road title forms such as "כביש בגין" without weakening city validation.
+// v23: search the cleaned street name first; street-type variants are only fallbacks.
 
 (function () {
-  const previousBuildQueries = typeof buildWikipediaSearchQueries === 'function'
-    ? buildWikipediaSearchQueries
-    : null;
-
   function normalize(value) {
     return String(value || '')
       .replace(/["׳״'־–—-]/g, ' ')
@@ -15,24 +11,32 @@
       .toLowerCase();
   }
 
+  function baseName(value) {
+    return String(value || '')
+      .replace(/^(רחוב|שדרות|שדרה|דרך|כביש|סמטת|סמטה)\s+/u, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
   function streetTokens(value) {
     return normalize(value).match(/[א-ת]+/gu)?.filter(token => token.length >= 2) || [];
   }
 
   buildWikipediaSearchQueries = function (street, city) {
-    const base = String(street || '')
-      .replace(/^(רחוב|שדרות|שדרה|דרך|כביש|סמטת|סמטה)\s+/u, '')
-      .trim();
+    const base = baseName(street);
     const shortCity = String(city || '').replace('-יפו', '').trim();
-    const inherited = previousBuildQueries ? previousBuildQueries(street, city) : [];
 
+    // Important: the untyped name is deliberately first. This lets Wikipedia find
+    // articles/mentions whose source uses a different road type (e.g. כביש vs דרך).
     return [...new Set([
-      ...inherited,
-      `כביש ${base} ${shortCity}`,
-      `דרך ${base} ${shortCity}`,
+      `${base} ${shortCity}`,
+      `"${base}" ${shortCity}`,
+      base,
       `רחוב ${base} ${shortCity}`,
-      `${base} ירושלים`,
-      `${base} ${shortCity}`
+      `דרך ${base} ${shortCity}`,
+      `שדרות ${base} ${shortCity}`,
+      `כביש ${base} ${shortCity}`,
+      `סמטת ${base} ${shortCity}`
     ].filter(Boolean))];
   };
 
@@ -42,8 +46,6 @@
     const targetTokens = streetTokens(street);
     if (!targetTokens.length) return false;
 
-    // Require all meaningful street-name tokens in the title, regardless of whether
-    // Wikipedia calls the object רחוב, דרך or כביש.
     const titleTokens = streetTokens(titleText);
     const hasStreetName = targetTokens.every(token => titleTokens.includes(token));
     if (!hasStreetName) return false;
