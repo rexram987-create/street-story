@@ -1,115 +1,26 @@
 // Wikipedia mention fallback for streets that do not have a standalone article under the entered name.
-// v23: searches the cleaned street name first, then type-prefixed variants; city/street evidence remains strict.
-
+// v24: broad discovery, strict city/street validation, stronger fact extraction, and conservative former-name filtering.
 (function () {
   if (typeof fetchAutomaticHistory !== 'function') return;
-
   const previousFetchAutomaticHistory = fetchAutomaticHistory;
   const WP_API = 'https://he.wikipedia.org/w/api.php';
-
-  function clean(value) { return String(value || '').replace(/\[[0-9]+\]/g, '').replace(/\s+/g, ' ').trim(); }
-  function norm(value) {
-    return clean(value).replace(/["׳״'־–—-]/g, ' ').replace(/^(רחוב|שדרות|שדרה|דרך|כביש|סמטה|סמטת)\s+/u, '').replace(/\s+/g, ' ').trim().toLowerCase();
-  }
-  function cityAliases(city) {
-    const n = norm(city);
-    if (n === 'ירושלים') return ['ירושלים'];
-    if (n === 'תל אביב' || n === 'תל אביב יפו') return ['תל אביב', 'תל אביב יפו'];
-    return n ? [n] : [];
-  }
-  function cityMatches(text, city) { const n = norm(text); return cityAliases(city).some(alias => n.includes(norm(alias))); }
-  function streetTokens(street) { return [...new Set(norm(street).match(/[א-ת]+/gu)?.filter(t => t.length >= 2) || [])]; }
-  function streetMatches(text, street) { const n = norm(text); const tokens = streetTokens(street); return tokens.length > 0 && tokens.every(token => n.includes(token)); }
-  function sentences(text) { return clean(text).split(/(?<=[.!?])\s+(?=[א-ת"׳״])/u).map(s => s.trim()).filter(s => s.length >= 20 && s.length <= 900); }
-  function relevantSentences(text, street, city) {
-    const cityInLead = cityMatches(text.slice(0, 1800), city);
-    return sentences(text).filter(sentence => streetMatches(sentence, street) && (cityMatches(sentence, city) || cityInLead));
-  }
-  function originFrom(list) { return list.find(s => /(?:נקרא|נקראת|קרוי|קרויה|נקראות).{0,120}?(?:על שם|על־שם|לזכר)/u.test(s)) || null; }
-  function foundedFrom(text) {
-    if (typeof extractExplicitFoundedYear === 'function') { const y = extractExplicitFoundedYear(text); if (y) return y; }
-    return clean(text).match(/(?:הקמת|סלילת|פתיחת|חנוכת|נחנך|נחנכה|נפתח|נפתחה)[^.!?]{0,120}?(?:בשנת|ב־|ב-)?\s*(18\d{2}|19\d{2}|20\d{2})/u)?.[1] || null;
-  }
-  function namedFrom(text) {
-    if (typeof extractExplicitNamedYear === 'function') { const y = extractExplicitNamedYear(text); if (y) return y; }
-    return clean(text).match(/(?:נקרא|נקראה|שונה שמו|שונה שמה|הוענק השם|ניתן השם)[^.!?]{0,120}?(?:בשנת|ב־|ב-)\s*(18\d{2}|19\d{2}|20\d{2})/u)?.[1] || null;
-  }
-  function formerFrom(text) { return typeof extractExplicitFormerNames === 'function' ? extractExplicitFormerNames(text) : []; }
-  function useful(value) { const t = clean(value); return Boolean(t) && !t.includes('לא נמצא'); }
-  function uniqSources(items) {
-    const seen = new Set();
-    return (items || []).filter(item => { if (!item) return false; const key = typeof item === 'string' ? item : `${item.url || ''}|${item.label || ''}`; if (seen.has(key)) return false; seen.add(key); return true; });
-  }
-
-  async function searchMentions(street, city) {
-    const base = norm(street);
-    // Broad discovery first. Prefixes are fallbacks, not assumptions about the official object type.
-    const searches = [...new Set([
-      `${base} ${city}`,
-      `"${base}" ${city}`,
-      base,
-      `"רחוב ${base}" ${city}`,
-      `"דרך ${base}" ${city}`,
-      `"שדרות ${base}" ${city}`,
-      `"כביש ${base}" ${city}`
-    ])];
-    const results = [];
-    for (const query of searches) {
-      const params = new URLSearchParams({ action: 'query', list: 'search', srsearch: query, srlimit: '10', srnamespace: '0', format: 'json', origin: '*' });
-      try {
-        const data = await fetchJson(`${WP_API}?${params}`, `wp-mention-v23:${query}`);
-        for (const item of data?.query?.search || []) if (!results.some(r => r.title === item.title)) results.push(item);
-      } catch (error) { console.warn('Wikipedia mention search failed:', error); }
-    }
-    return results.slice(0, 24);
-  }
-
-  async function fetchArticle(title) {
-    const params = new URLSearchParams({ action: 'query', prop: 'extracts|info', explaintext: '1', inprop: 'url', titles: title, format: 'json', origin: '*' });
-    const data = await fetchJson(`${WP_API}?${params}`, `wp-mention-article-v23:${title}`);
-    const page = Object.values(data?.query?.pages || {})[0];
-    if (!page || page.missing !== undefined || !page.extract) return null;
-    return { title: page.title, text: clean(page.extract), url: page.fullurl };
-  }
-
-  async function findMentionEvidence(street, city) {
-    const candidates = await searchMentions(street, city);
-    for (const candidate of candidates) {
-      let article;
-      try { article = await fetchArticle(candidate.title); } catch (_) { continue; }
-      if (!article || !cityMatches(article.text.slice(0, 2400), city) || !streetMatches(article.text, street)) continue;
-      const rel = relevantSentences(article.text, street, city);
-      if (!rel.length) continue;
-      const joined = rel.join(' ');
-      const originSentence = originFrom(rel);
-      const foundedYear = foundedFrom(joined);
-      const namedYear = namedFrom(joined);
-      const formerNames = formerFrom(joined);
-      if (!originSentence && !foundedYear && !namedYear && !formerNames.length) continue;
-      return { article, rel, originSentence, foundedYear, namedYear, formerNames };
-    }
-    return null;
-  }
-
-  fetchAutomaticHistory = async function(street, city) {
-    let base = null;
-    try { base = await previousFetchAutomaticHistory(street, city); } catch (error) { console.warn('Base lookup failed:', error); }
-    const needsFallback = !base || !useful(base.origin) || !useful(base.description) || !base.foundedYear || !base.namedYear || !(base.formerNames?.length);
-    if (!needsFallback) return base;
-    let evidence = null;
-    try { evidence = await findMentionEvidence(street, city); } catch (error) { console.warn('Wikipedia mention fallback failed:', error); }
-    if (!evidence) return base;
-    const description = evidence.rel.slice(0, 4).join(' ').slice(0, 1100);
-    return {
-      ...(base || {}),
-      origin: useful(base?.origin) ? base.origin : (evidence.originSentence ? `לפי ויקיפדיה: ${evidence.originSentence}` : 'לא נמצא במקורות שנבדקו'),
-      foundedYear: base?.foundedYear || evidence.foundedYear || null,
-      namedYear: base?.namedYear || evidence.namedYear || null,
-      formerNames: base?.formerNames?.length ? base.formerNames : evidence.formerNames,
-      description: useful(base?.description) ? base.description : description,
-      sources: uniqSources([...(base?.sources || []), { label: `ויקיפדיה — אזכור מאומת ב${evidence.article.title}`, url: evidence.article.url }]),
-      automatic: true,
-      wikipediaMentionFallback: true
-    };
-  };
+  function clean(v){return String(v||'').replace(/\[[0-9]+\]/g,'').replace(/\s+/g,' ').trim();}
+  function norm(v){return clean(v).replace(/["׳״'־–—-]/g,' ').replace(/^(רחוב|שדרות|שדרה|דרך|כביש|סמטה|סמטת)\s+/u,'').replace(/\s+/g,' ').trim().toLowerCase();}
+  function cityAliases(city){const n=norm(city);if(n==='ירושלים')return['ירושלים'];if(n==='תל אביב'||n==='תל אביב יפו')return['תל אביב','תל אביב יפו'];return n?[n]:[];}
+  function cityMatches(text,city){const n=norm(text);return cityAliases(city).some(a=>n.includes(norm(a)));}
+  function streetTokens(street){return [...new Set(norm(street).match(/[א-ת]+/gu)?.filter(t=>t.length>=2)||[])];}
+  function streetMatches(text,street){const n=norm(text),t=streetTokens(street);return t.length>0&&t.every(x=>n.includes(x));}
+  function sentences(text){return clean(text).split(/(?<=[.!?])\s+(?=[א-ת"׳״])/u).map(s=>s.trim()).filter(s=>s.length>=18&&s.length<=1000);}
+  function relevantSentences(text,street,city){const leadCity=cityMatches(text.slice(0,2200),city);return sentences(text).filter(s=>streetMatches(s,street)&&(cityMatches(s,city)||leadCity));}
+  function originFrom(list){return list.find(s=>/(?:נקרא|נקראת|קרוי|קרויה|נקראות|נקראים)[^.!?]{0,180}(?:על שם|על־שם|לזכר|מנציח)/u.test(s))||null;}
+  function foundedFrom(text){const s=clean(text);const patterns=[/(?:נחנך|נחנכה|נפתח|נפתחה|נסלל|נסללה|הוקם|הוקמה)[^.!?]{0,140}?(?:בשנת|ב־|ב-)?\s*(18\d{2}|19\d{2}|20\d{2})/u,/(?:בשנת|ב־|ב-)\s*(18\d{2}|19\d{2}|20\d{2})[^.!?]{0,140}?(?:נחנך|נחנכה|נפתח|נפתחה|נסלל|נסללה|הוקם|הוקמה)/u,/(?:חנוכת|פתיחת|סלילת|הקמת)[^.!?]{0,160}?(18\d{2}|19\d{2}|20\d{2})/u];for(const p of patterns){const m=s.match(p);if(m?.[1])return m[1];}return null;}
+  function namedFrom(text){const s=clean(text);const patterns=[/(?:נקרא|נקראה|נקבע|נקבעה|הוענק|הוענק לו|הוענק לה|ניתן|ניתן לו|ניתן לה)[^.!?]{0,180}?(?:השם|על שם|על־שם)?[^.!?]{0,100}?(?:בשנת|ב־|ב-)\s*(18\d{2}|19\d{2}|20\d{2})/u,/(?:בשנת|ב־|ב-)\s*(18\d{2}|19\d{2}|20\d{2})[^.!?]{0,180}?(?:נקרא|נקראה|נקבע|נקבעה|הוענק|ניתן)[^.!?]{0,80}?(?:השם|על שם|על־שם)/u];for(const p of patterns){const m=s.match(p);if(m?.[1])return m[1];}return null;}
+  function plausibleFormerName(v,street){const c=clean(v).replace(/^["״']|["״']$/g,'').trim();if(!c||c.length<2||c.length>55)return null;if(/[.!?:;,()\[\]{}]/u.test(c))return null;if(/\b(?:בשנת|לאחר|כאשר|שבו|שבה|אשר|עקב|בגלל|במהלך|נחנך|נסלל|נקרא|שונה|הוחלף)\b/u.test(c))return null;if(c.split(/\s+/).length>7)return null;if(norm(c)===norm(street))return null;return c;}
+  function formerFrom(text,street){const out=[];const add=v=>{const c=plausibleFormerName(v,street);if(c&&!out.includes(c))out.push(c);};const s=clean(text);const patterns=[/(?:נקרא|נקראה)\s+(?:בעבר|קודם לכן|לפני כן|תחילה|בראשיתו|בראשיתה)\s+["״']?([^"״'.;,]{2,55})["״']?/gu,/(?:שמו|שמה)\s+(?:הקודם|הקודמת)\s+(?:היה|הייתה)\s+["״']?([^"״'.;,]{2,55})["״']?/gu,/(?:שונה|הוחלף|הוסב)\s+(?:שמו|שמה)\s+מ[־-]?["״']?([^"״'.;,]{2,55})["״']?\s+(?:ל|אל)/gu];for(const p of patterns)for(const m of s.matchAll(p))add(m[1]);return out.slice(0,4);}
+  function useful(v){const t=clean(v);return Boolean(t)&&!t.includes('לא נמצא');}
+  function uniqSources(items){const seen=new Set();return(items||[]).filter(i=>{if(!i)return false;const k=typeof i==='string'?i:`${i.url||''}|${i.label||''}`;if(seen.has(k))return false;seen.add(k);return true;});}
+  async function searchMentions(street,city){const base=norm(street);const searches=[...new Set([`${base} ${city}`,`"${base}" ${city}`,base,`"רחוב ${base}" ${city}`,`"דרך ${base}" ${city}`,`"שדרות ${base}" ${city}`,`"כביש ${base}" ${city}`])];const results=[];for(const query of searches){const params=new URLSearchParams({action:'query',list:'search',srsearch:query,srlimit:'10',srnamespace:'0',format:'json',origin:'*'});try{const data=await fetchJson(`${WP_API}?${params}`,`wp-mention-v24:${query}`);for(const item of data?.query?.search||[])if(!results.some(r=>r.title===item.title))results.push(item);}catch(e){console.warn('Wikipedia mention search failed:',e);}}return results.slice(0,24);}
+  async function fetchArticle(title){const params=new URLSearchParams({action:'query',prop:'extracts|info',explaintext:'1',inprop:'url',titles:title,format:'json',origin:'*'});const data=await fetchJson(`${WP_API}?${params}`,`wp-mention-article-v24:${title}`);const page=Object.values(data?.query?.pages||{})[0];if(!page||page.missing!==undefined||!page.extract)return null;return{title:page.title,text:clean(page.extract),url:page.fullurl};}
+  async function findMentionEvidence(street,city){const candidates=await searchMentions(street,city);let best=null;for(const candidate of candidates){let article;try{article=await fetchArticle(candidate.title);}catch(_){continue;}if(!article||!cityMatches(article.text.slice(0,2800),city)||!streetMatches(article.text,street))continue;const rel=relevantSentences(article.text,street,city);if(!rel.length)continue;const joined=rel.join(' ');const evidence={article,rel,originSentence:originFrom(rel),foundedYear:foundedFrom(joined),namedYear:namedFrom(joined),formerNames:formerFrom(joined,street)};const score=(evidence.originSentence?4:0)+(evidence.foundedYear?3:0)+(evidence.namedYear?3:0)+(evidence.formerNames.length?2:0)+Math.min(rel.length,3);if(!best||score>best.score)best={...evidence,score};}return best;}
+  fetchAutomaticHistory=async function(street,city){let base=null;try{base=await previousFetchAutomaticHistory(street,city);}catch(e){console.warn('Base lookup failed:',e);}const needs=!base||!useful(base.origin)||!useful(base.description)||!base.foundedYear||!base.namedYear||!(base.formerNames?.length);if(!needs)return base;let ev=null;try{ev=await findMentionEvidence(street,city);}catch(e){console.warn('Wikipedia mention fallback failed:',e);}if(!ev)return base;const safeBaseFormer=(base?.formerNames||[]).map(v=>plausibleFormerName(v,street)).filter(Boolean);return{...(base||{}),origin:useful(base?.origin)?base.origin:(ev.originSentence?`לפי ויקיפדיה: ${ev.originSentence}`:'לא נמצא במקורות שנבדקו'),foundedYear:base?.foundedYear||ev.foundedYear||null,namedYear:base?.namedYear||ev.namedYear||null,formerNames:safeBaseFormer.length?safeBaseFormer:ev.formerNames,description:useful(base?.description)?base.description:ev.rel.slice(0,4).join(' ').slice(0,1100),sources:uniqSources([...(base?.sources||[]),{label:`ויקיפדיה — אזכור מאומת ב${ev.article.title}`,url:ev.article.url}]),automatic:true,wikipediaMentionFallback:true};};
 })();
