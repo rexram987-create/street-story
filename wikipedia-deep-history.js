@@ -1,5 +1,6 @@
 // Deep Wikipedia history enrichment.
 // Reads the full Hebrew Wikipedia article (not only the lead) and extracts only explicit facts.
+// v20 also verifies that a Wikipedia street article belongs to the requested city before using it.
 // It never invents a date or a former name when the article does not state one clearly.
 
 (function () {
@@ -30,6 +31,100 @@
       .replace(/\s+/g, ' ')
       .trim();
   }
+
+  function normalizePlace(value) {
+    return String(value || '')
+      .replace(/["׳״'־–—-]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+  }
+
+  function cityAliases(city) {
+    const normalized = normalizePlace(city);
+    if (normalized === 'ירושלים') return ['ירושלים'];
+    if (normalized === 'תל אביב' || normalized === 'תל אביב יפו') {
+      return ['תל אביב', 'תל אביב יפו', 'תל־אביב', 'תל אביב-יפו'];
+    }
+    return normalized ? [normalized] : [];
+  }
+
+  function textMentionsCity(text, city) {
+    const normalizedText = normalizePlace(text);
+    return cityAliases(city).some(alias => normalizedText.includes(normalizePlace(alias)));
+  }
+
+  function textMentionsOtherPilotCity(text, city) {
+    const normalizedCity = normalizePlace(city);
+    const normalizedText = normalizePlace(text);
+    if (normalizedCity === 'ירושלים') return normalizedText.includes('תל אביב');
+    if (normalizedCity === 'תל אביב' || normalizedCity === 'תל אביב יפו') return normalizedText.includes('ירושלים');
+    return false;
+  }
+
+  async function fetchWikipediaLeadForValidation(title) {
+    const params = new URLSearchParams({
+      action: 'query',
+      prop: 'extracts',
+      exintro: '1',
+      explaintext: '1',
+      titles: title,
+      format: 'json',
+      origin: '*'
+    });
+    const data = await fetchJson(`${WP_API}?${params}`, `wp-city-check-v20:${title}`);
+    const page = Object.values(data?.query?.pages || {})[0];
+    if (!page || page.missing !== undefined) return '';
+    return cleanText(page.extract || '');
+  }
+
+  async function candidateMatchesRequestedCity(title, street, city) {
+    if (typeof isLikelyStreetArticle === 'function' && !isLikelyStreetArticle(title, street, city)) return false;
+
+    // A city in the title is the strongest inexpensive signal.
+    if (textMentionsCity(title, city)) return true;
+
+    const lead = await fetchWikipediaLeadForValidation(title);
+    if (!lead) return false;
+
+    // Reject a clearly conflicting city before accepting generic street-name matches.
+    if (textMentionsOtherPilotCity(`${title} ${lead}`, city) && !textMentionsCity(`${title} ${lead}`, city)) {
+      return false;
+    }
+
+    return textMentionsCity(`${title} ${lead}`, city);
+  }
+
+  // Replace the loose Wikipedia selector with a city-aware selector.
+  // This is deliberately global so the earlier Wikipedia/Wikidata pipeline also uses it.
+  searchWikipediaStreet = async function(street, city) {
+    const queries = typeof buildWikipediaSearchQueries === 'function'
+      ? buildWikipediaSearchQueries(street, city)
+      : [`רחוב ${street} ${city}`, `${street} ${city}`];
+
+    for (const query of queries) {
+      const params = new URLSearchParams({
+        action: 'query',
+        list: 'search',
+        srsearch: query,
+        srlimit: '8',
+        srnamespace: '0',
+        format: 'json',
+        origin: '*'
+      });
+      const data = await fetchJson(`${WP_API}?${params}`, `wp-search-city-v20:${query}`);
+      const matches = data?.query?.search || [];
+
+      for (const item of matches) {
+        try {
+          if (await candidateMatchesRequestedCity(item.title, street, city)) return item.title;
+        } catch (error) {
+          console.warn(`Wikipedia city validation failed for ${item.title}:`, error);
+        }
+      }
+    }
+    return null;
+  };
 
   function sentences(text) {
     return cleanText(text)
@@ -126,7 +221,7 @@
       format: 'json',
       origin: '*'
     });
-    const data = await fetchJson(`${WP_API}?${params}`, `wp-full-v19:${title}`);
+    const data = await fetchJson(`${WP_API}?${params}`, `wp-full-v20:${title}`);
     const page = Object.values(data?.query?.pages || {})[0];
     if (!page || page.missing !== undefined || !page.extract) return null;
     return { title: page.title, text: cleanText(page.extract), url: page.fullurl };
@@ -181,6 +276,7 @@
         { label: `ויקיפדיה — ${article.title} (הערך המלא)`, url: article.url }
       ]),
       automatic: true,
+      wikipediaCityValidated: true,
       deepWikipediaRead: true,
       deepWikipediaFacts: {
         origin: Boolean(originSentence),
